@@ -4,10 +4,11 @@ import tldextract
 import json
 import re
 from urllib.parse import urlparse
-import os
 
-# Liste des extensions de fichiers à ignorer
-IGNORED_EXTENSIONS = ['.svg', '.png', '.jpg', '.jpeg', '.webp', '.gif', '.ico', '.xml', '.css', '.js', '.woff', '.woff2', '.ttf', '.eot', '.otf']
+IGNORED_EXTENSIONS = [
+    ".svg", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".ico",
+    ".xml", ".css", ".js", ".woff", ".woff2", ".ttf", ".eot", ".otf"
+]
 
 def detect_reseau(url):
     domaines = {
@@ -18,7 +19,9 @@ def detect_reseau(url):
         "google.com": "Google",
         "goo.gl": "Google Maps",
         "g.co": "Google Maps (short)",
-        "youtube.com": "YouTube"
+        "youtube.com": "YouTube",
+        "tripadvisor.com": "TripAdvisor",
+        "tripadvisor.fr": "TripAdvisor"
     }
     domaine = tldextract.extract(url).registered_domain
     return domaines.get(domaine, "Autre / inconnu")
@@ -33,8 +36,15 @@ def is_ignored_file(url):
 
 def check_url(url, language="fr-FR"):
     headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept-Language": language
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": language,
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive"
     }
 
     try:
@@ -46,13 +56,7 @@ def check_url(url, language="fr-FR"):
         if code >= 400:
             erreur = f"Erreur HTTP {code}"
         elif is_ignored_file(final_url) or not is_html_content_type(response.headers):
-            return {
-                "initial_url": url,
-                "final_url": final_url,
-                "reseau": detect_reseau(final_url),
-                "http_status": code,
-                "erreur": "Type de contenu non analysé (fichier ou binaire)"
-            }
+            erreur = "Type de contenu non analysé (fichier ou non-HTML)"
         else:
             try:
                 soup = BeautifulSoup(response.text, "html.parser")
@@ -99,7 +103,7 @@ if __name__ == "__main__":
         data = json.load(f)
 
     langue = "fr-FR"
-    urls = list(set(extract_urls(data)))  # uniques
+    urls = list(set(extract_urls(data)))
     print(f"🔗 {len(urls)} lien(s) détecté(s) dans le fichier JSON.")
 
     results = []
@@ -108,8 +112,7 @@ if __name__ == "__main__":
         results.append(result)
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
-    # Écriture du résultat dans un fichier JSON
     with open("output_links_check.json", "w", encoding="utf-8") as out:
         json.dump(results, out, indent=2, ensure_ascii=False)
 
-    print(f"\n✅ Résultats enregistrés dans 'output_links_check.json'")
+    print("\n✅ Résultats enregistrés dans 'output_links_check.json'")

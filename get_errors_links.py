@@ -1,12 +1,11 @@
 import requests
-from bs4 import BeautifulSoup
-import tldextract
+import extruct
+from w3lib.html import get_base_url
 import json
 import re
+import tldextract
 from urllib.parse import urlparse
-from difflib import SequenceMatcher
-
-IGNORED_EXTENSIONS = [".svg", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".ico", ".xml", ".css", ".js", ".woff", ".woff2", ".ttf", ".eot", ".otf"]
+from bs4 import BeautifulSoup
 
 RESEAUX_VALIDES = {
     "facebook.com": "Facebook",
@@ -25,93 +24,74 @@ def detect_reseau(url):
     domaine = tldextract.extract(url).registered_domain
     return RESEAUX_VALIDES.get(domaine)
 
-def is_html_content_type(headers):
-    return "text/html" in headers.get("Content-Type", "")
+def get_structured_data(html, url):
+    return extruct.extract(html, base_url=get_base_url(html, url), syntaxes=['json-ld', 'microdata', 'opengraph'])
 
-def is_ignored_file(url):
-    path = urlparse(url).path
-    return any(path.lower().endswith(ext) for ext in IGNORED_EXTENSIONS)
+def is_valid_business(structured_data, nom, ville, activites):
+    nom = nom.lower()
+    ville = ville.lower()
+    activites = [a.lower() for a in activites]
 
-def extract_text_from_html(html):
-    soup = BeautifulSoup(html, "html.parser")
-    texts = []
-    if soup.title:
-        texts.append(soup.title.get_text())
-    for tag in soup.find_all("meta"):
-        if tag.get("content"):
-            texts.append(tag["content"])
-    return " ".join(texts)
+    def contains_all(text):
+        return all(word in text.lower() for word in [nom, ville] + activites)
 
-def compute_similarity_score(page_text, nom, ville, activites):
-    score = 0
-    base = 0
+    for source in structured_data.values():
+        for item in source:
+            json_data = item.get('@type') if isinstance(item, dict) else None
+            full_data = json.dumps(item).lower()
+            if contains_all(full_data):
+                return True
+    return False
 
-    def contains(term):
-        return term.lower() in page_text.lower()
-
-    if nom:
-        base += 1
-        if contains(nom):
-            score += 1
-    if ville:
-        base += 1
-        if contains(ville):
-            score += 1
-    for act in activites:
-        base += 1
-        if contains(act):
-            score += 1
-
-    return round(score / base, 2) if base > 0 else 0
-
-def check_url(url, language, nom, ville, activites):
+def check_url(url, nom, ville, activites, language="fr-FR"):
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/124.0.0.0 Safari/537.36"
         ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": language,
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection": "keep-alive"
+        "Accept-Language": language
     }
 
     try:
         response = requests.get(url, headers=headers, timeout=10, allow_redirects=True)
         final_url = response.url
         code = response.status_code
-
         reseau = detect_reseau(final_url)
-        if not reseau or is_ignored_file(final_url) or not is_html_content_type(response.headers):
-            return None  # Ignore les liens non pertinents
 
-        soup_text = extract_text_from_html(response.text)
-        score = compute_similarity_score(soup_text, nom, ville, activites)
+        if code >= 400 or not reseau:
+            return None  # Erreur ou domaine non pertinent
 
-        erreur = None
-        url_corrigee = None
-        if score < 0.5:
-            erreur = f"Lien potentiellement incorrect (pertinence : {score})"
-            url_corrigee = None  # à définir manuellement ou par système de recherche plus poussé
+        structured_data = get_structured_data(response.text, final_url)
+        valid = is_valid_business(structured_data, nom, ville, activites)
+
+        soup = BeautifulSoup(response.text, 'lxml')
+        title = soup.title.string if soup.title else ''
+        meta = " ".join([m.get("content", "") for m in soup.find_all("meta")])
+        full_text = " ".join([title, meta])
+
+        valid_fallback = (
+            nom.lower() in full_text.lower()
+            and (ville.lower() in full_text.lower() or any(a in full_text.lower() for a in activites))
+        )
 
         return {
             "initial_url": url,
             "final_url": final_url,
             "reseau": reseau,
             "http_status": code,
-            "pertinence": score,
-            "erreur": erreur,
-            "url_corrigee": url_corrigee
+            "pertinent": valid or valid_fallback,
+            "erreur": None if (valid or valid_fallback) else "Non reconnu comme la bonne activité",
+            "url_corrigee": None  # Peut être rempli plus tard si faux lien
         }
 
-    except requests.RequestException as e:
+    except Exception as e:
         return {
             "initial_url": url,
             "final_url": None,
-            "reseau": "Inconnu",
+            "reseau": "Erreur",
             "http_status": None,
-            "pertinence": 0,
+            "pertinent": False,
             "erreur": str(e),
             "url_corrigee": None
         }
@@ -134,16 +114,14 @@ if __name__ == "__main__":
 
     langue = "fr-FR"
     urls = list(set(extract_urls(data)))
-    print(f"🔗 {len(urls)} lien(s) détecté(s).")
 
-    # Infos de référence pour le matching
     nom = data.get("info", {}).get("name", "")
     ville = data.get("info", {}).get("addresses", [{}])[0].get("city", "")
     activites = data.get("info", {}).get("tags", [])
 
     results = []
     for url in urls:
-        result = check_url(url, langue, nom, ville, activites)
+        result = check_url(url, nom, ville, activites, langue)
         if result:
             results.append(result)
             print(json.dumps(result, indent=2, ensure_ascii=False))

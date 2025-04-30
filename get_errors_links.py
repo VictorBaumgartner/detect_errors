@@ -3,6 +3,11 @@ from bs4 import BeautifulSoup
 import tldextract
 import json
 import re
+from urllib.parse import urlparse
+import os
+
+# Liste des extensions de fichiers à ignorer
+IGNORED_EXTENSIONS = ['.svg', '.png', '.jpg', '.jpeg', '.webp', '.gif', '.ico', '.xml', '.css', '.js', '.woff', '.woff2', '.ttf', '.eot', '.otf']
 
 def detect_reseau(url):
     domaines = {
@@ -18,6 +23,14 @@ def detect_reseau(url):
     domaine = tldextract.extract(url).registered_domain
     return domaines.get(domaine, "Autre / inconnu")
 
+def is_html_content_type(headers):
+    content_type = headers.get("Content-Type", "")
+    return "text/html" in content_type
+
+def is_ignored_file(url):
+    path = urlparse(url).path
+    return any(path.lower().endswith(ext) for ext in IGNORED_EXTENSIONS)
+
 def check_url(url, language="fr-FR"):
     headers = {
         "User-Agent": "Mozilla/5.0",
@@ -32,15 +45,24 @@ def check_url(url, language="fr-FR"):
 
         if code >= 400:
             erreur = f"Erreur HTTP {code}"
+        elif is_ignored_file(final_url) or not is_html_content_type(response.headers):
+            return {
+                "initial_url": url,
+                "final_url": final_url,
+                "reseau": detect_reseau(final_url),
+                "http_status": code,
+                "erreur": "Type de contenu non analysé (fichier ou binaire)"
+            }
         else:
-            soup = BeautifulSoup(response.text, "html.parser")
-            title = soup.title.string.lower() if soup.title else ""
-
-            # Vérification de page attendue pour les URLs Google
-            if "google.com/maps" not in final_url and "search" not in final_url and "g.page" not in final_url and "g.co" in url:
-                erreur = "Lien court Google redirige vers une page inattendue"
-            elif any(e in title for e in ["error", "not found", "page introuvable"]):
-                erreur = f"Problème détecté dans la page : {title}"
+            try:
+                soup = BeautifulSoup(response.text, "html.parser")
+                title = soup.title.string.lower() if soup.title else ""
+                if "google.com/maps" not in final_url and "search" not in final_url and "g.page" not in final_url and "g.co" in url:
+                    erreur = "Lien court Google redirige vers une page inattendue"
+                elif any(e in title for e in ["error", "not found", "page introuvable"]):
+                    erreur = f"Problème détecté dans le titre de la page : {title}"
+            except Exception as e:
+                erreur = f"Erreur lors de l’analyse HTML : {str(e)}"
 
         return {
             "initial_url": url,
@@ -59,7 +81,6 @@ def check_url(url, language="fr-FR"):
             "erreur": str(e)
         }
 
-# Récupère toutes les URLs dans un dictionnaire JSON récursivement
 def extract_urls(obj):
     urls = []
     if isinstance(obj, dict):
@@ -73,15 +94,22 @@ def extract_urls(obj):
         urls.extend(matches)
     return urls
 
-# Script principal
 if __name__ == "__main__":
     with open("topkite-fr.json", "r", encoding="utf-8") as f:
         data = json.load(f)
 
     langue = "fr-FR"
-    urls = list(set(extract_urls(data)))  # URLs uniques
-
+    urls = list(set(extract_urls(data)))  # uniques
     print(f"🔗 {len(urls)} lien(s) détecté(s) dans le fichier JSON.")
+
+    results = []
     for url in urls:
         result = check_url(url, langue)
+        results.append(result)
         print(json.dumps(result, indent=2, ensure_ascii=False))
+
+    # Écriture du résultat dans un fichier JSON
+    with open("output_links_check.json", "w", encoding="utf-8") as out:
+        json.dump(results, out, indent=2, ensure_ascii=False)
+
+    print(f"\n✅ Résultats enregistrés dans 'output_links_check.json'")

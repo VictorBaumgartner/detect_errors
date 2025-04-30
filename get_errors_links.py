@@ -6,29 +6,24 @@ import re
 from urllib.parse import urlparse
 from difflib import SequenceMatcher
 
-IGNORED_EXTENSIONS = [
-    ".svg", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".ico",
-    ".xml", ".css", ".js", ".woff", ".woff2", ".ttf", ".eot", ".otf"
-]
+IGNORED_EXTENSIONS = [".svg", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".ico", ".xml", ".css", ".js", ".woff", ".woff2", ".ttf", ".eot", ".otf"]
 
-# Seuil minimal de similarité pour considérer le contenu comme correspondant
-SIMILARITY_THRESHOLD = 0.3
+RESEAUX_VALIDES = {
+    "facebook.com": "Facebook",
+    "instagram.com": "Instagram",
+    "twitter.com": "Twitter",
+    "linkedin.com": "LinkedIn",
+    "google.com": "Google",
+    "goo.gl": "Google Maps",
+    "g.co": "Google Maps (short)",
+    "youtube.com": "YouTube",
+    "tripadvisor.com": "TripAdvisor",
+    "tripadvisor.fr": "TripAdvisor"
+}
 
 def detect_reseau(url):
-    domaines = {
-        "facebook.com": "Facebook",
-        "instagram.com": "Instagram",
-        "twitter.com": "Twitter",
-        "linkedin.com": "LinkedIn",
-        "google.com": "Google",
-        "goo.gl": "Google Maps",
-        "g.co": "Google Maps (short)",
-        "youtube.com": "YouTube",
-        "tripadvisor.com": "TripAdvisor",
-        "tripadvisor.fr": "TripAdvisor"
-    }
     domaine = tldextract.extract(url).registered_domain
-    return domaines.get(domaine, None)
+    return RESEAUX_VALIDES.get(domaine)
 
 def is_html_content_type(headers):
     return "text/html" in headers.get("Content-Type", "")
@@ -42,17 +37,34 @@ def extract_text_from_html(html):
     texts = []
     if soup.title:
         texts.append(soup.title.get_text())
-    for tag in soup.find_all(["meta", "p", "h1", "h2", "h3"]):
-        if tag.name == "meta" and tag.get("content"):
+    for tag in soup.find_all("meta"):
+        if tag.get("content"):
             texts.append(tag["content"])
-        elif tag.string:
-            texts.append(tag.get_text())
     return " ".join(texts)
 
-def compute_similarity(a, b):
-    return SequenceMatcher(None, a.lower(), b.lower()).ratio()
+def compute_similarity_score(page_text, nom, ville, activites):
+    score = 0
+    base = 0
 
-def check_url(url, language="fr-FR", reference_text=""):
+    def contains(term):
+        return term.lower() in page_text.lower()
+
+    if nom:
+        base += 1
+        if contains(nom):
+            score += 1
+    if ville:
+        base += 1
+        if contains(ville):
+            score += 1
+    for act in activites:
+        base += 1
+        if contains(act):
+            score += 1
+
+    return round(score / base, 2) if base > 0 else 0
+
+def check_url(url, language, nom, ville, activites):
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -69,33 +81,28 @@ def check_url(url, language="fr-FR", reference_text=""):
         response = requests.get(url, headers=headers, timeout=10, allow_redirects=True)
         final_url = response.url
         code = response.status_code
-        erreur = None
-        similarity = None
 
         reseau = detect_reseau(final_url)
-        if not reseau:
-            return None  # Ignorer les liens inconnus
+        if not reseau or is_ignored_file(final_url) or not is_html_content_type(response.headers):
+            return None  # Ignore les liens non pertinents
 
-        if code >= 400:
-            erreur = f"Erreur HTTP {code}"
-        elif is_ignored_file(final_url) or not is_html_content_type(response.headers):
-            erreur = "Type de contenu non analysé (fichier ou non-HTML)"
-        else:
-            try:
-                page_text = extract_text_from_html(response.text)
-                similarity = compute_similarity(reference_text, page_text)
-                if similarity < SIMILARITY_THRESHOLD:
-                    erreur = f"Contenu peu pertinent (similarité = {similarity:.2f})"
-            except Exception as e:
-                erreur = f"Erreur analyse HTML : {str(e)}"
+        soup_text = extract_text_from_html(response.text)
+        score = compute_similarity_score(soup_text, nom, ville, activites)
+
+        erreur = None
+        url_corrigee = None
+        if score < 0.5:
+            erreur = f"Lien potentiellement incorrect (pertinence : {score})"
+            url_corrigee = None  # à définir manuellement ou par système de recherche plus poussé
 
         return {
             "initial_url": url,
             "final_url": final_url,
             "reseau": reseau,
             "http_status": code,
+            "pertinence": score,
             "erreur": erreur,
-            "similarity_score": similarity
+            "url_corrigee": url_corrigee
         }
 
     except requests.RequestException as e:
@@ -104,8 +111,9 @@ def check_url(url, language="fr-FR", reference_text=""):
             "final_url": None,
             "reseau": "Inconnu",
             "http_status": None,
+            "pertinence": 0,
             "erreur": str(e),
-            "similarity_score": None
+            "url_corrigee": None
         }
 
 def extract_urls(obj):
@@ -117,8 +125,7 @@ def extract_urls(obj):
         for item in obj:
             urls.extend(extract_urls(item))
     elif isinstance(obj, str):
-        matches = re.findall(r'https?://[^\s"\'<>]+', obj)
-        urls.extend(matches)
+        urls += re.findall(r'https?://[^\s"\'<>]+', obj)
     return urls
 
 if __name__ == "__main__":
@@ -127,18 +134,17 @@ if __name__ == "__main__":
 
     langue = "fr-FR"
     urls = list(set(extract_urls(data)))
-    print(f"🔗 {len(urls)} lien(s) détecté(s) dans le fichier JSON.")
+    print(f"🔗 {len(urls)} lien(s) détecté(s).")
 
-    # Texte de référence basé sur le contenu JSON (nom, ville, description)
+    # Infos de référence pour le matching
     nom = data.get("info", {}).get("name", "")
     ville = data.get("info", {}).get("addresses", [{}])[0].get("city", "")
-    description = " ".join([nom, ville])
-    reference_text = description.strip()
+    activites = data.get("info", {}).get("tags", [])
 
     results = []
     for url in urls:
-        result = check_url(url, langue, reference_text=reference_text)
-        if result and not result["reseau"] is None:
+        result = check_url(url, langue, nom, ville, activites)
+        if result:
             results.append(result)
             print(json.dumps(result, indent=2, ensure_ascii=False))
 
